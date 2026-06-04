@@ -83,6 +83,12 @@ public class WebExplorer {
         // 检测系统是否安装了 Google Chrome，优先使用系统 Chrome（更难被检测）
         String chromePath = findSystemChrome();
 
+        // 获取屏幕尺寸，用于最大化窗口
+        java.awt.Dimension screenSize = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
+        int screenWidth = screenSize.width;
+        int screenHeight = screenSize.height;
+        logger.info("屏幕分辨率: {}x{}", screenWidth, screenHeight);
+
         BrowserType.LaunchOptions launchOptions = new BrowserType.LaunchOptions()
             .setHeadless(config.isHeadless())
             .setArgs(Arrays.asList(
@@ -93,9 +99,7 @@ public class WebExplorer {
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-site-isolation-trials",
-                "--window-size=" + config.getWindowWidth() + "," + config.getWindowHeight(),
                 "--lang=zh-CN",
-                "--start-maximized",
                 "--disable-infobars",
                 "--disable-extensions",
                 "--disable-notifications",
@@ -116,9 +120,9 @@ public class WebExplorer {
         this.browser = playwright.chromium().launch(launchOptions);
 
         // 创建浏览器上下文，设置完整的反检测参数
-        // viewportSize设为null以支持--start-maximized，浏览器会使用实际窗口大小
+        // 使用屏幕尺寸作为 viewport，实现最大化效果
         Browser.NewContextOptions contextOptions = new Browser.NewContextOptions()
-            .setViewportSize(null)
+            .setViewportSize(screenWidth, screenHeight)
             .setUserAgent(config.getUserAgent())
             .setLocale("zh-CN")
             .setTimezoneId("Asia/Shanghai")
