@@ -508,14 +508,66 @@ public class WebExplorer {
                     continue;
                 }
 
-                // 使用找到的输入框和确认按钮
+                // ========== 关键防护：确保输入框和确认按钮有效 ==========
+                if (captcha.input == null) {
+                    logger.error("[步骤3] ❌ captcha.input 为 null，无法回填验证码！保存调试信息...");
+                    saveDebugInfo("captcha_input_null_" + attempt);
+                    boolean refreshed = clickRefreshCaptchaLink();
+                    if (!refreshed) {
+                        logger.warn("[步骤3] 刷新验证码失败，直接重试 ({}/{})", attempt, config.getMaxCaptchaRetry());
+                    }
+                    page.waitForTimeout(2000);
+                    continue;
+                }
+                if (captcha.confirm == null) {
+                    logger.error("[步骤3] ❌ captcha.confirm 为 null，无法提交验证码！保存调试信息...");
+                    saveDebugInfo("captcha_confirm_null_" + attempt);
+                    boolean refreshed = clickRefreshCaptchaLink();
+                    if (!refreshed) {
+                        logger.warn("[步骤3] 刷新验证码失败，直接重试 ({}/{})", attempt, config.getMaxCaptchaRetry());
+                    }
+                    page.waitForTimeout(2000);
+                    continue;
+                }
+
+                // 确保输入框和按钮在 DOM 中
+                try {
+                    if (captcha.input.count() == 0) {
+                        logger.error("[步骤3] ❌ 验证码输入框不在 DOM 中，保存调试信息...");
+                        saveDebugInfo("captcha_input_missing_" + attempt);
+                        clickRefreshCaptchaLink();
+                        page.waitForTimeout(2000);
+                        continue;
+                    }
+                    if (captcha.confirm.count() == 0) {
+                        logger.error("[步骤3] ❌ 验证码确认按钮不在 DOM 中，保存调试信息...");
+                        saveDebugInfo("captcha_confirm_missing_" + attempt);
+                        clickRefreshCaptchaLink();
+                        page.waitForTimeout(2000);
+                        continue;
+                    }
+                } catch (Exception checkEx) {
+                    logger.warn("[步骤3] 检查元素存在性时出错: {}", checkEx.getMessage());
+                }
+
+                // ========== 回填验证码 ==========
                 logger.info("[步骤3] 正在回填验证码 '{}' 到输入框...", code);
                 captcha.input.fill(code);
-                logger.info("[步骤3] 验证码已回填，正在点击确认按钮...");
+                logger.info("[步骤3] ✅ 验证码 '{}' 已回填到输入框", code);
+
+                // 短暂等待确保 fill 完成
+                page.waitForTimeout(500);
+
+                // 回填后截图验证
+                saveDebugInfo("after_fill_" + attempt);
+
+                // ========== 点击确认按钮 ==========
+                logger.info("[步骤3] 正在点击确认按钮...");
                 captcha.confirm.click();
                 page.waitForTimeout(config.getActionDelayMillis() + 500);
-                logger.info("[步骤3] 已点击确认按钮，等待页面响应...");
+                logger.info("[步骤3] ✅ 已点击确认按钮，等待页面响应...");
 
+                // ========== 检查验证结果 ==========
                 CaptchaStatus status = checkCaptchaStatus();
                 logger.info("[步骤3] 验证码状态检查结果: {}", status);
 
@@ -525,17 +577,27 @@ public class WebExplorer {
                     return;
                 }
 
-                // 验证码失效或错误，点击"换一张"刷新后重试
+                // 验证码失效或错误，必须刷新后重试
                 if (status == CaptchaStatus.INVALID) {
-                    logger.warn("[步骤3] ❌ 验证码已失效/错误（OCR识别结果: '{}'），点击'换一张'刷新后重试 ({}/{})", code, attempt, config.getMaxCaptchaRetry());
-                    clickRefreshCaptchaLink();
+                    logger.warn("[步骤3] ❌ 验证码已失效/错误（OCR识别结果: '{}'），必须刷新后重试 ({}/{})",
+                        code, attempt, config.getMaxCaptchaRetry());
+                    boolean refreshed = clickRefreshCaptchaLink();
+                    if (!refreshed) {
+                        logger.error("[步骤3] ⚠️ 点击'换一张'失败！尝试 JS 强制刷新...");
+                        refreshCaptchaByJs();
+                    }
                     page.waitForTimeout(2000); // 等待2秒让新验证码加载
                     continue;
                 }
 
                 // 验证失败（未知原因），刷新验证码后重试
-                logger.warn("[步骤3] ❌ 验证码验证失败（OCR识别结果: '{}'），点击'换一张'刷新后重试 ({}/{})", code, attempt, config.getMaxCaptchaRetry());
-                clickRefreshCaptchaLink();
+                logger.warn("[步骤3] ❌ 验证码验证失败（OCR识别结果: '{}'），刷新后重试 ({}/{})",
+                    code, attempt, config.getMaxCaptchaRetry());
+                boolean refreshed = clickRefreshCaptchaLink();
+                if (!refreshed) {
+                    logger.error("[步骤3] ⚠️ 刷新失败，尝试 JS 强制刷新...");
+                    refreshCaptchaByJs();
+                }
                 page.waitForTimeout(2000);
                 continue;
 
@@ -544,8 +606,10 @@ public class WebExplorer {
                     logger.info("[步骤3] 未检测到验证码，跳过");
                     return;
                 }
-                logger.error("[步骤3] 验证码处理异常", e);
-                // 保存异常时的调试信息
+                logger.error("[步骤3] Playwright 异常: {}", e.getMessage(), e);
+                saveDebugInfo("captcha_playwright_error_" + attempt);
+            } catch (Exception e) {
+                logger.error("[步骤3] 发生异常: {}", e.getMessage(), e);
                 saveDebugInfo("captcha_error_" + attempt);
             }
         }
@@ -569,6 +633,7 @@ public class WebExplorer {
 
     /**
      * 查找验证码元素：使用 JavaScript 直接操作 DOM
+     * 必须确保返回的 CaptchaElements 中 input 和 confirm 都不为 null，否则返回 null
      */
     private CaptchaElements findCaptchaElements() {
         // 策略1：用 JavaScript 直接通过 id 获取（最可靠）
@@ -579,67 +644,35 @@ public class WebExplorer {
 
                 Locator captchaImg = page.locator("#vcodeimg");
 
-                // 查找输入框：先尝试常见 id，再尝试验证码图片附近的 input
-                Locator captchaInput = null;
-                String[] inputSelectors = {
-                    "#vcode",
-                    "input[name='vcode']",
-                    "input[placeholder*='验证码']",
-                    "input[placeholder*='校验']",
-                    "input[type='text']"
-                };
-                for (String sel : inputSelectors) {
-                    Locator loc = page.locator(sel);
-                    int count = loc.count();
-                    if (count > 0) {
-                        logger.info("[步骤3] 找到验证码输入框 | 选择器: {} | 数量: {}", sel, count);
-                        // 如果有多个，优先选择验证码图片附近的（通过 DOM 位置判断）
-                        if (count > 1) {
-                            captchaInput = findInputNearCaptcha(captchaImg, loc);
-                        } else {
-                            captchaInput = loc.first();
-                        }
-                        break;
-                    }
-                }
+                // 查找输入框
+                Locator captchaInput = findCaptchaInputNearImage(captchaImg);
                 if (captchaInput == null) {
-                    logger.warn("[步骤3] 未找到验证码输入框！");
+                    logger.error("[步骤3] ❌ 策略1未找到验证码输入框，尝试策略3...");
+                    // 降级到策略3
+                    return findCaptchaElementsFallback();
                 }
 
                 // 查找确认按钮
-                Locator confirmBtn = null;
-                String[] confirmSelectors = {
-                    "button:has-text('验证')",
-                    "button:has-text('确定')",
-                    "button:has-text('确认')",
-                    "button:has-text('提交')",
-                    "a:has-text('验证')",
-                    "a:has-text('确定')",
-                    ".btn-confirm",
-                    "#confirm",
-                    "button"
-                };
-                for (String sel : confirmSelectors) {
-                    Locator loc = page.locator(sel);
-                    int count = loc.count();
-                    if (count > 0) {
-                        logger.info("[步骤3] 找到确认按钮 | 选择器: {} | 数量: {}", sel, count);
-                        confirmBtn = loc.first();
-                        break;
-                    }
-                }
+                Locator confirmBtn = findCaptchaConfirmNearImage(captchaImg);
                 if (confirmBtn == null) {
-                    logger.warn("[步骤3] 未找到确认按钮！");
+                    logger.error("[步骤3] ❌ 策略1未找到验证码确认按钮，尝试策略3...");
+                    return findCaptchaElementsFallback();
                 }
 
-                logger.info("[步骤3] 通过 JS 找到完整的验证码元素 (img={}, input={}, confirm={})",
-                    captchaImg.count() > 0, captchaInput != null, confirmBtn != null);
+                logger.info("[步骤3] ✅ 通过策略1找到完整的验证码元素");
                 return new CaptchaElements(captchaImg, captchaInput, confirmBtn, true);
             }
         } catch (Exception e) {
             logger.debug("JS 查找 vcodeimg 失败: {}", e.getMessage());
         }
 
+        return findCaptchaElementsFallback();
+    }
+
+    /**
+     * 查找验证码元素的降级策略（策略3）
+     */
+    private CaptchaElements findCaptchaElementsFallback() {
         // 策略2：遍历所有 img 元素查找（调试用）
         logger.info("[步骤3] 遍历页面上所有 img 元素...");
         try {
@@ -662,57 +695,152 @@ public class WebExplorer {
             "img[src*='captcha']", "img[src*='verify']"
         };
         Locator captchaImg = findFirstVisible(imgSelectors);
-        if (captchaImg == null) return null;
+        if (captchaImg == null) {
+            logger.info("[步骤3] 策略3未找到任何验证码图片");
+            return null;
+        }
 
-        Locator captchaInput = findCaptchaInput();
-        Locator confirmBtn = findCaptchaConfirm();
+        Locator captchaInput = findCaptchaInputNearImage(captchaImg);
+        Locator confirmBtn = findCaptchaConfirmNearImage(captchaImg);
+
+        if (captchaInput == null || confirmBtn == null) {
+            logger.error("[步骤3] ❌ 策略3也未找到完整的验证码元素 (input={}, confirm={})",
+                captchaInput != null, confirmBtn != null);
+            return null;
+        }
+
+        logger.info("[步骤3] ✅ 通过策略3找到完整的验证码元素");
         return new CaptchaElements(captchaImg, captchaInput, confirmBtn, false);
     }
 
     /**
-     * 在多个 input 元素中找到距离验证码图片最近的一个
+     * 通过 JavaScript 在验证码图片的 DOM 父链中查找输入框
      */
-    private Locator findInputNearCaptcha(Locator captchaImg, Locator allInputs) {
-        try {
-            List<Locator> inputs = allInputs.all();
-            if (inputs.size() <= 1) {
-                return inputs.isEmpty() ? null : inputs.get(0);
-            }
-
-            // 通过 JS 获取验证码图片的位置
-            Object captchaRect = captchaImg.evaluate(
-                "element => { return { x: element.getBoundingClientRect().x, y: element.getBoundingClientRect().y }; }");
-            if (captchaRect == null) {
-                return inputs.get(0);
-            }
-
-            // 简化处理：返回第一个可见的 input
-            for (Locator input : inputs) {
-                try {
-                    if (input.isVisible()) {
-                        return input;
-                    }
-                } catch (Exception ignored) {}
-            }
-            return inputs.get(0);
-        } catch (Exception e) {
-            logger.debug("查找最近的输入框失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * 在指定容器内查找元素
-     */
-    private Locator findInContainer(Locator container, String[] selectors) {
-        for (String selector : selectors) {
+    private Locator findCaptchaInputNearImage(Locator captchaImg) {
+        // 先尝试常见选择器
+        String[] inputSelectors = {
+            "#vcode",
+            "input[name='vcode']",
+            "input[placeholder*='验证码']",
+            "input[placeholder*='校验']",
+            "input[type='text']"
+        };
+        for (String sel : inputSelectors) {
             try {
-                Locator loc = container.locator(selector);
-                if (loc.count() > 0 && loc.first().isVisible()) {
+                Locator loc = page.locator(sel);
+                int count = loc.count();
+                if (count > 0) {
+                    logger.info("[步骤3] 找到候选输入框 | 选择器: {} | 数量: {}", sel, count);
+                    if (count > 1) {
+                        // 有多个，返回第一个可见的
+                        List<Locator> all = loc.all();
+                        for (Locator l : all) {
+                            try { if (l.isVisible()) return l; } catch (Exception ignored) {}
+                        }
+                        return all.get(0);
+                    }
                     return loc.first();
                 }
             } catch (Exception ignored) {}
         }
+
+        // 用 JS 在验证码图片附近查找
+        try {
+            Object inputInfo = page.evaluate(
+                "() => {\n"
+                + "  var img = document.getElementById('vcodeimg');\n"
+                + "  if (!img) return null;\n"
+                + "  var parent = img.parentElement;\n"
+                + "  for (var i = 0; i < 5 && parent; i++) {\n"
+                + "    var inputs = parent.querySelectorAll('input[type=text], input:not([type])');\n"
+                + "    if (inputs.length > 0) {\n"
+                + "      return { found: true, count: inputs.length, firstId: inputs[0].id || '', firstName: inputs[0].name || '' };\n"
+                + "    }\n"
+                + "    parent = parent.parentElement;\n"
+                + "  }\n"
+                + "  return null;\n"
+                + "}");
+            if (inputInfo != null) {
+                logger.info("[步骤3] JS 在验证码附近找到输入框: {}", inputInfo);
+                // 重新用选择器获取
+                for (String sel : inputSelectors) {
+                    try {
+                        Locator loc = page.locator(sel);
+                        if (loc.count() > 0) return loc.first();
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("JS 查找附近输入框失败: {}", e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * 通过 JavaScript 在验证码图片的 DOM 父链中查找确认按钮
+     */
+    private Locator findCaptchaConfirmNearImage(Locator captchaImg) {
+        // 先尝试常见选择器
+        String[] confirmSelectors = {
+            "button:has-text('验证')",
+            "button:has-text('确定')",
+            "button:has-text('确认')",
+            "button:has-text('提交')",
+            "a:has-text('验证')",
+            "a:has-text('确定')",
+            ".btn-confirm",
+            "#confirm",
+            "button",
+            "a"
+        };
+        for (String sel : confirmSelectors) {
+            try {
+                Locator loc = page.locator(sel);
+                int count = loc.count();
+                if (count > 0) {
+                    logger.info("[步骤3] 找到候选确认按钮 | 选择器: {} | 数量: {}", sel, count);
+                    if (count > 1) {
+                        List<Locator> all = loc.all();
+                        for (Locator l : all) {
+                            try { if (l.isVisible()) return l; } catch (Exception ignored) {}
+                        }
+                        return all.get(0);
+                    }
+                    return loc.first();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 用 JS 在验证码图片附近查找
+        try {
+            Object btnInfo = page.evaluate(
+                "() => {\n"
+                + "  var img = document.getElementById('vcodeimg');\n"
+                + "  if (!img) return null;\n"
+                + "  var parent = img.parentElement;\n"
+                + "  for (var i = 0; i < 5 && parent; i++) {\n"
+                + "    var btns = parent.querySelectorAll('button, a, input[type=submit]');\n"
+                + "    if (btns.length > 0) {\n"
+                + "      return { found: true, count: btns.length, firstText: btns[0].textContent || btns[0].value || '' };\n"
+                + "    }\n"
+                + "    parent = parent.parentElement;\n"
+                + "  }\n"
+                + "  return null;\n"
+                + "}");
+            if (btnInfo != null) {
+                logger.info("[步骤3] JS 在验证码附近找到按钮: {}", btnInfo);
+                for (String sel : confirmSelectors) {
+                    try {
+                        Locator loc = page.locator(sel);
+                        if (loc.count() > 0) return loc.first();
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("JS 查找附近按钮失败: {}", e.getMessage());
+        }
+
         return null;
     }
 
@@ -740,43 +868,6 @@ public class WebExplorer {
             }
         }
         return false;
-    }
-
-    /** 查找验证码输入框 */
-    private Locator findCaptchaInput() {
-        String[] selectors = {
-            config.getCaptchaInputSelector(),
-            "input[name='captcha']",
-            "input[name='verifyCode']",
-            "input[placeholder*='验证码']",
-            "#captcha_input",
-            ".captcha-input",
-            "input[type='text']"
-        };
-        for (String selector : selectors) {
-            Locator loc = page.locator(selector);
-            if (loc.count() > 0) return loc.first();
-        }
-        throw new RuntimeException("未找到验证码输入框");
-    }
-
-    /** 查找验证码确认按钮 */
-    private Locator findCaptchaConfirm() {
-        String[] selectors = {
-            config.getCaptchaConfirmSelector(),
-            "button:has-text('验证')",
-            "button:has-text('确认')",
-            "button:has-text('提交')",
-            "a:has-text('确定')",
-            "input[type='submit']",
-            ".btn-confirm",
-            "#confirm"
-        };
-        for (String selector : selectors) {
-            Locator loc = page.locator(selector);
-            if (loc.count() > 0) return loc.first();
-        }
-        throw new RuntimeException("未找到验证码确认按钮");
     }
 
     /** 步骤4：点击搜索结果中的公司链接 */
@@ -1097,37 +1188,95 @@ public class WebExplorer {
 
     /**
      * 点击"看不清，换一张"链接刷新验证码
+     * @return 是否成功点击刷新链接
      */
-    private void clickRefreshCaptchaLink() {
+    private boolean clickRefreshCaptchaLink() {
         String[] refreshSelectors = {
             "a:has-text('看不清')",
             "a:has-text('换一张')",
             "a:has-text('换一换')",
             "span:has-text('看不清')",
             "span:has-text('换一张')",
+            "span:has-text('换一换')",
             ".change-captcha",
             "#changeCaptcha",
             "a[onclick*='captcha']",
-            "a[onclick*='refresh']"
+            "a[onclick*='refresh']",
+            "a[onclick*='change']",
+            ".refresh-captcha",
+            "#refreshCaptcha"
         };
         for (String selector : refreshSelectors) {
             try {
                 Locator loc = page.locator(selector);
-                if (loc.count() > 0 && loc.first().isVisible()) {
-                    loc.first().click();
-                    logger.info("[步骤3] 已点击刷新验证码链接 | 选择器: {}", selector);
-                    return;
+                int count = loc.count();
+                if (count > 0) {
+                    boolean visible = loc.first().isVisible();
+                    logger.info("[步骤3] 尝试刷新选择器 '{}' | count={} visible={}", selector, count, visible);
+                    if (visible) {
+                        loc.first().click();
+                        logger.info("[步骤3] ✅ 已点击刷新验证码链接 | 选择器: {}", selector);
+                        return true;
+                    }
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                logger.debug("[步骤3] 选择器 '{}' 刷新失败: {}", selector, e.getMessage());
+            }
         }
-        logger.debug("[步骤3] 未找到'换一张'链接");
+
+        // 尝试 JS 直接刷新
+        logger.warn("[步骤3] ⚠️ 未找到'换一张'链接，尝试 JS 强制刷新...");
+        return refreshCaptchaByJs();
+    }
+
+    /**
+     * 通过 JavaScript 强制刷新验证码
+     * 尝试：1. 触发验证码图片点击 2. 修改 src 加时间戳 3. 查找所有含刷新关键字的元素点击
+     * @return 是否成功刷新
+     */
+    private boolean refreshCaptchaByJs() {
+        try {
+            Object result = page.evaluate(
+                "() => {\n"
+                + "  try {\n"
+                + "    var img = document.getElementById('vcodeimg');\n"
+                + "    if (img) {\n"
+                + "      // 方法1：直接点击图片触发刷新\n"
+                + "      img.click();\n"
+                + "      // 方法2：给 src 加时间戳强制刷新\n"
+                + "      if (img.src) {\n"
+                + "        var sep = img.src.indexOf('?') >= 0 ? '&' : '?';\n"
+                + "        img.src = img.src.split('?')[0] + sep + '_t=' + Date.now();\n"
+                + "      }\n"
+                + "      return 'clicked_and_reloaded';\n"
+                + "    }\n"
+                + "    // 方法3：遍历所有元素找刷新关键字\n"
+                + "    var all = document.querySelectorAll('a, span, button, div');\n"
+                + "    for (var i = 0; i < all.length; i++) {\n"
+                + "      var text = (all[i].textContent || all[i].value || '').trim();\n"
+                + "      if (text.indexOf('看不清') >= 0 || text.indexOf('换一张') >= 0 || text.indexOf('换一换') >= 0 || text.indexOf('刷新') >= 0) {\n"
+                + "        all[i].click();\n"
+                + "        return 'found_and_clicked: ' + text;\n"
+                + "      }\n"
+                + "    }\n"
+                + "    return 'not_found';\n"
+                + "  } catch (e) {\n"
+                + "    return 'error: ' + e.message;\n"
+                + "  }\n"
+                + "}");
+            String resultStr = String.valueOf(result);
+            logger.info("[步骤3] JS 刷新验证码结果: {}", resultStr);
+            return resultStr != null && !resultStr.contains("not_found") && !resultStr.contains("error");
+        } catch (Exception e) {
+            logger.error("[步骤3] JS 刷新验证码失败: {}", e.getMessage());
+            return false;
+        }
     }
 
     private void refreshCaptcha() {
-        try {
-            page.locator(config.getCaptchaImageSelector()).click();
-        } catch (Exception e) {
-            logger.debug("刷新验证码失败: {}", e.getMessage());
+        boolean ok = clickRefreshCaptchaLink();
+        if (!ok) {
+            refreshCaptchaByJs();
         }
     }
 
