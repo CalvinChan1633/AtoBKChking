@@ -783,6 +783,8 @@ public class WebExplorer {
     private Locator findCaptchaConfirmNearImage(Locator captchaImg) {
         // 先尝试常见选择器
         String[] confirmSelectors = {
+            "a.confirm",
+            ".vcodepop .buttongroup a.confirm",
             "button:has-text('验证')",
             "button:has-text('确定')",
             "button:has-text('确认')",
@@ -1109,17 +1111,13 @@ public class WebExplorer {
 
     /**
      * 下载验证码原图（通过 img.src 属性获取 URL 下载）
-     * 支持三种方式：直接下载 URL、解析 data URL、JS 绘制到 canvas 获取 base64
+     * 支持多种方式：直接下载 URL、解析 data URL、JS 绘制到 canvas、元素截图
+     *
+     * 关键处理：如果 vcodeimg.src 为空（初始状态），先触发验证码加载
      */
     private byte[] downloadCaptchaImage(Locator captchaImg) {
-        // 方式1：通过 Playwright evaluate 获取 src（注意变量名必须是 element）
-        String src = null;
-        try {
-            src = (String) captchaImg.evaluate("element => element.src");
-            logger.info("[步骤3] 验证码 img.src = {}", src != null ? src.substring(0, Math.min(src.length(), 100)) : "null");
-        } catch (Exception e) {
-            logger.warn("[步骤3] 获取 img.src 失败: {}", e.getMessage());
-        }
+        // 先检查 src，如果为空则触发加载
+        String src = getCaptchaSrcWithRetry(captchaImg);
 
         if (src != null && !src.isEmpty()) {
             // 如果是 base64 编码的图片
@@ -1187,6 +1185,82 @@ public class WebExplorer {
     }
 
     /**
+     * 获取验证码图片的 src，如果为空则触发加载并等待
+     * 同时检查图片是否已加载完成（complete && naturalWidth > 0）
+     */
+    private String getCaptchaSrcWithRetry(Locator captchaImg) {
+        for (int i = 0; i < 5; i++) {
+            String src = null;
+            boolean imgLoaded = false;
+            try {
+                src = (String) captchaImg.evaluate("element => element.src");
+                // 检查图片是否已加载完成
+                Object loaded = captchaImg.evaluate(
+                    "element => element.complete && element.naturalWidth > 0");
+                imgLoaded = Boolean.TRUE.equals(loaded);
+            } catch (Exception e) {
+                logger.warn("[步骤3] 获取 img.src 失败: {}", e.getMessage());
+            }
+
+            logger.info("[步骤3] 验证码 img.src 尝试 {}/5 = {} | 图片加载完成={}", i + 1,
+                (src != null && !src.isEmpty()) ? src.substring(0, Math.min(src.length(), 80)) : "(空)",
+                imgLoaded);
+
+            if (src != null && !src.isEmpty() && imgLoaded) {
+                return src;
+            }
+
+            // src 为空或图片未加载，尝试触发验证码加载
+            logger.info("[步骤3] 验证码 src 为空或图片未加载，尝试触发加载...");
+            triggerCaptchaLoad();
+            page.waitForTimeout(2000); // 等待图片加载
+        }
+        return null;
+    }
+
+    /**
+     * 触发验证码图片加载（vcodeimg.src 为空时的处理）
+     * 通过 JS 调用网站的 updateVocdeFun() 加载验证码图片
+     */
+    private void triggerCaptchaLoad() {
+        try {
+            Object result = page.evaluate(
+                "() => {\n"
+                + "  try {\n"
+                + "    // 方法1：调用网站自带的 updateVocdeFun() 刷新验证码\n"
+                + "    if (typeof updateVocdeFun === 'function') {\n"
+                + "      updateVocdeFun();\n"
+                + "      return 'updateVocdeFun() called';\n"
+                + "    }\n"
+                + "    // 方法2：点击验证码图片触发加载\n"
+                + "    var img = document.getElementById('vcodeimg');\n"
+                + "    if (img) {\n"
+                + "      img.click();\n"
+                + "      return 'img clicked';\n"
+                + "    }\n"
+                + "    // 方法3：显示模态框（如果隐藏）\n"
+                + "    var pop = document.querySelector('.vcodepop');\n"
+                + "    if (pop) {\n"
+                + "      pop.style.display = 'block';\n"
+                + "      var mask = document.querySelector('.mask');\n"
+                + "      if (mask) mask.style.display = 'block';\n"
+                + "      // 显示后再点击验证码图片触发加载\n"
+                + "      var img2 = document.getElementById('vcodeimg');\n"
+                + "      if (img2) img2.click();\n"
+                + "      return 'popup shown and img clicked';\n"
+                + "    }\n"
+                + "    return 'no action';\n"
+                + "  } catch (e) {\n"
+                + "    return 'error: ' + e.message;\n"
+                + "  }\n"
+                + "}");
+            logger.info("[步骤3] 触发验证码加载结果: {}", result);
+        } catch (Exception e) {
+            logger.warn("[步骤3] 触发验证码加载失败: {}", e.getMessage());
+        }
+    }
+
+    /**
      * 点击"看不清，换一张"链接刷新验证码
      * @return 是否成功点击刷新链接
      */
@@ -1239,16 +1313,16 @@ public class WebExplorer {
             Object result = page.evaluate(
                 "() => {\n"
                 + "  try {\n"
+                + "    // 方法1：调用网站自带的 updateVocdeFun()\n"
+                + "    if (typeof updateVocdeFun === 'function') {\n"
+                + "      updateVocdeFun();\n"
+                + "      return 'updateVocdeFun called';\n"
+                + "    }\n"
+                + "    // 方法2：点击验证码图片触发刷新\n"
                 + "    var img = document.getElementById('vcodeimg');\n"
                 + "    if (img) {\n"
-                + "      // 方法1：直接点击图片触发刷新\n"
                 + "      img.click();\n"
-                + "      // 方法2：给 src 加时间戳强制刷新\n"
-                + "      if (img.src) {\n"
-                + "        var sep = img.src.indexOf('?') >= 0 ? '&' : '?';\n"
-                + "        img.src = img.src.split('?')[0] + sep + '_t=' + Date.now();\n"
-                + "      }\n"
-                + "      return 'clicked_and_reloaded';\n"
+                + "      return 'img clicked';\n"
                 + "    }\n"
                 + "    // 方法3：遍历所有元素找刷新关键字\n"
                 + "    var all = document.querySelectorAll('a, span, button, div');\n"
@@ -1322,39 +1396,62 @@ public class WebExplorer {
             return CaptchaStatus.PASSED;
         }
 
-        // 检查3：页面是否有"失效"、"错误"提示
-        String[] errorKeywords = {"失效", "错误", "失败", "请重新申请", "不正确", "超时", "验证码"};
-        String pageText = "";
+        // 检查3：检查可见的错误提示元素（不是整个 body 文本，避免误判隐藏的 "验证码错误"）
+        boolean errorTipVisible = false;
         try {
-            pageText = page.locator("body").textContent();
-        } catch (Exception ignored) {}
-
-        for (String keyword : errorKeywords) {
-            if (pageText.contains(keyword)) {
-                logger.warn("[步骤3] 检测到页面包含 '{}' 提示", keyword);
-                // 进一步确认是否是验证码相关的错误提示
-                // 如果页面上还有验证码图片，说明是验证码错误
-                if (imgExists) {
-                    return CaptchaStatus.INVALID;
+            Locator errorTip = page.locator(".errortip");
+            if (errorTip.count() > 0) {
+                errorTipVisible = errorTip.isVisible();
+                if (errorTipVisible) {
+                    String tipText = errorTip.textContent();
+                    logger.warn("[步骤3] 检测到可见的错误提示: '{}'", tipText);
                 }
             }
+        } catch (Exception e) {
+            logger.debug("[步骤3] 检查错误提示时出错: {}", e.getMessage());
         }
 
-        // 检查4：当前 URL 是否变化（验证通过后可能跳转或加载新内容）
+        // 检查4：通过 JS 检查模态框是否已关闭（验证成功的最直接标志）
+        boolean popupHidden = false;
+        try {
+            Object popupDisplay = page.evaluate(
+                "() => {\n"
+                + "  var pop = document.querySelector('.vcodepop');\n"
+                + "  if (!pop) return 'not_found';\n"
+                + "  return pop.style.display;\n"
+                + "}");
+            popupHidden = "none".equals(popupDisplay);
+            logger.info("[步骤3] 模态框状态: display={}", popupDisplay);
+        } catch (Exception e) {
+            logger.debug("[步骤3] 检查模态框状态失败: {}", e.getMessage());
+        }
+
+        if (popupHidden) {
+            logger.info("[步骤3] 验证码模态框已关闭，判断为验证通过");
+            return CaptchaStatus.PASSED;
+        }
+
+        // 如果有可见的错误提示且验证码图片还在，说明验证失败
+        if (errorTipVisible && imgVisible) {
+            logger.warn("[步骤3] 错误提示可见且验证码仍在，判断为验证码错误");
+            return CaptchaStatus.INVALID;
+        }
+
+        // 检查5：当前 URL 是否变化，是否有搜索结果
         String currentUrl = page.url();
         if (!currentUrl.contains("captcha") && !currentUrl.contains("verify") && hasSearchResults()) {
             logger.info("[步骤3] 页面已有搜索结果，判断为验证通过");
             return CaptchaStatus.PASSED;
         }
 
-        // 验证码图片还在，且没有明确通过迹象
+        // 验证码图片仍然可见，没有明确通过或错误迹象 -> 可能是正在处理中
         if (imgVisible) {
-            logger.info("[步骤3] 验证码图片仍然可见，判断为验证未通过");
+            logger.info("[步骤3] 验证码图片仍然可见，等待后重试");
             return CaptchaStatus.FAILED;
         }
 
-        // 图片存在但不可见（可能被隐藏），再等待一下
-        logger.info("[步骤3] 验证码图片存在但不可见，可能是隐藏/过渡状态，等待后重试");
+        // 图片存在但不可见（可能被隐藏），可能是过渡状态
+        logger.info("[步骤3] 验证码图片存在但不可见，可能是隐藏/过渡状态");
         return CaptchaStatus.FAILED;
     }
 
