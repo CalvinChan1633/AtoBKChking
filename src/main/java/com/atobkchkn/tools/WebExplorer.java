@@ -104,7 +104,22 @@ public class WebExplorer {
                 "--disable-translate",
                 "--disable-logging",
                 "--no-default-browser-check",
-                "--no-first-run"
+                "--no-first-run",
+                // 新增反检测参数
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-breakpad",
+                "--disable-component-update",
+                "--disable-default-apps",
+                "--disable-features=TranslateUI",
+                "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection",
+                "--disable-renderer-backgrounding",
+                "--force-color-profile=srgb",
+                "--metrics-recording-only",
+                "--password-store=basic",
+                "--use-mock-keychain"
             ));
 
         if (chromePath != null) {
@@ -129,18 +144,35 @@ public class WebExplorer {
         context.addInitScript("() => {\n"
             + "  // 移除 webdriver 标志\n"
             + "  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });\n"
+            + "  delete navigator.__proto__.webdriver;\n"
             + "  \n"
             + "  // 伪装插件\n"
             + "  Object.defineProperty(navigator, 'plugins', {\n"
             + "    get: () => [\n"
-            + "      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },\n"
-            + "      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format viewer' },\n"
-            + "      { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client module' }\n"
+            + "      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', version: 'undefined', length: 1, item: () => null, namedItem: () => null },\n"
+            + "      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format viewer', version: 'undefined', length: 1, item: () => null, namedItem: () => null },\n"
+            + "      { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client module', version: 'undefined', length: 2, item: () => null, namedItem: () => null }\n"
+            + "    ]\n"
+            + "  });\n"
+            + "  Object.defineProperty(navigator, 'mimeTypes', {\n"
+            + "    get: () => [\n"
+            + "      { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: navigator.plugins[0] },\n"
+            + "      { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: navigator.plugins[1] }\n"
             + "    ]\n"
             + "  });\n"
             + "  \n"
             + "  // 伪装 chrome 对象\n"
-            + "  window.chrome = { runtime: { OnInstalledReason: { CHROME_UPDATE: 'chrome_update' } } };\n"
+            + "  window.chrome = {\n"
+            + "    runtime: {\n"
+            + "      OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },\n"
+            + "      OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },\n"
+            + "      PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },\n"
+            + "      PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },\n"
+            + "      PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },\n"
+            + "      RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' }\n"
+            + "    },\n"
+            + "    app: { isInstalled: false }\n"
+            + "  };\n"
             + "  \n"
             + "  // 伪装 Notification\n"
             + "  if (window.Notification) {\n"
@@ -155,9 +187,43 @@ public class WebExplorer {
             + "      : originalQuery(parameters)\n"
             + "  );\n"
             + "  \n"
-            + "  // 移除自动化特征\n"
-            + "  delete navigator.__proto__.webdriver;\n"
-            + "}");
+            + "  // 伪装 canvas fingerprint\n"
+            + "  const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;\n"
+            + "  const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;\n"
+            + "  HTMLCanvasElement.prototype.toDataURL = function(type) {\n"
+            + "    if (this.width === 0 || this.height === 0) return originalToDataURL.call(this, type);\n"
+            + "    // 添加微小噪点避免被检测\n"
+            + "    const ctx = this.getContext('2d');\n"
+            + "    const imageData = ctx.getImageData(0, 0, this.width, this.height);\n"
+            + "    for (let i = 0; i < imageData.data.length; i += 4) {\n"
+            + "      imageData.data[i] = (imageData.data[i] + 1) % 256;\n"
+            + "    }\n"
+            + "    ctx.putImageData(imageData, 0, 0);\n"
+            + "    return originalToDataURL.call(this, type);\n"
+            + "  };\n"
+            + "  \n"
+            + "  // 伪装 WebGL\n"
+            + "  const getParameter = WebGLRenderingContext.prototype.getParameter;\n"
+            + "  WebGLRenderingContext.prototype.getParameter = function(parameter) {\n"
+            + "    if (parameter === 37445) {\n"
+            + "      return 'Intel Inc.';\n"
+            + "    }\n"
+            + "    if (parameter === 37446) {\n"
+            + "      return 'Intel Iris OpenGL Engine';\n"
+            + "    }\n"
+            + "    return getParameter(parameter);\n"
+            + "  };\n"
+            + "  \n"
+            + "  // 伪装屏幕尺寸\n"
+            + "  Object.defineProperty(window.screen, 'width', { get: () => window.innerWidth });\n"
+            + "  Object.defineProperty(window.screen, 'height', { get: () => window.innerHeight });\n"
+            + "  Object.defineProperty(window.screen, 'availWidth', { get: () => window.innerWidth });\n"
+            + "  Object.defineProperty(window.screen, 'availHeight', { get: () => window.innerHeight });\n"
+            + "  \n"
+            + "  // 伪装 deviceMemory\n"
+            + "  Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });\n"
+            + "  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });\n"
+            + "");
 
         this.page = context.newPage();
     }
@@ -231,6 +297,9 @@ public class WebExplorer {
 
     /** 步骤2：输入公司名称并搜索 */
     private void step2SearchCompany(String companyName) {
+        // 随机延迟，模拟真人操作
+        randomDelay(500, 1500);
+
         // 多选择器尝试查找搜索输入框
         String[] inputSelectors = {
             config.getSearchInputSelector(),
@@ -249,22 +318,29 @@ public class WebExplorer {
             "input"
         };
         Locator searchInput = findLocatorWithFallback(inputSelectors, "搜索输入框");
+
+        // 模拟鼠标移动到输入框
+        searchInput.hover();
+        randomDelay(200, 500);
+
+        // 模拟逐字输入（更像真人）
+        searchInput.click();
+        randomDelay(100, 300);
         searchInput.fill(companyName);
         logger.info("[步骤2] 已输入公司名称: {}", companyName);
+
+        randomDelay(300, 800);
 
         // 多选择器尝试查找搜索按钮（CSS + 文本内容）
         Locator searchBtn = findSearchButton();
 
-        // 点击搜索按钮，并监听新页面打开（有些网站会在新页面显示结果）
-        Page newPage = context.waitForPage(() -> {
-            searchBtn.click();
-            logger.info("[步骤2] 已点击搜索按钮");
-        });
+        // 模拟鼠标移动到按钮
+        searchBtn.hover();
+        randomDelay(200, 500);
 
-        if (newPage != null && !newPage.equals(page)) {
-            logger.info("[步骤2] 检测到新页面打开，切换到新页面");
-            page = newPage;
-        }
+        // 点击搜索按钮
+        searchBtn.click();
+        logger.info("[步骤2] 已点击搜索按钮");
 
         // 等待搜索结果页面加载
         page.waitForLoadState(LoadState.NETWORKIDLE);
@@ -1046,6 +1122,18 @@ public class WebExplorer {
             }
         }
         return null;
+    }
+
+    /**
+     * 随机延迟，模拟真人操作间隔
+     */
+    private void randomDelay(int minMillis, int maxMillis) {
+        int delay = minMillis + (int) (Math.random() * (maxMillis - minMillis));
+        try {
+            Thread.sleep(delay);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
