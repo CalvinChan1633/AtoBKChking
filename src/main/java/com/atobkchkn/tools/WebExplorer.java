@@ -1,7 +1,7 @@
 package com.atobkchkn.tools;
 
 import com.atobkchkn.tools.captcha.CaptchaResolver;
-import com.atobkchkn.tools.captcha.OcrCaptchaResolver;
+import com.atobkchkn.tools.captcha.OnlineOcrCaptchaResolver;
 import com.atobkchkn.tools.config.WebExplorerConfig;
 import com.microsoft.playwright.*;
 import com.microsoft.playwright.options.LoadState;
@@ -51,10 +51,10 @@ public class WebExplorer {
     private final CaptchaResolver captchaResolver;
 
     /**
-     * 默认构造：使用默认配置 + OCR 自动识别
+     * 默认构造：使用默认配置 + 在线 OCR 自动识别
      */
     public WebExplorer() {
-        this(new WebExplorerConfig(), new OcrCaptchaResolver());
+        this(new WebExplorerConfig(), new OnlineOcrCaptchaResolver());
     }
 
     /**
@@ -68,7 +68,7 @@ public class WebExplorer {
      * 指定配置
      */
     public WebExplorer(WebExplorerConfig config) {
-        this(config, new OcrCaptchaResolver());
+        this(config, new OnlineOcrCaptchaResolver());
     }
 
     /**
@@ -83,16 +83,11 @@ public class WebExplorer {
         // 检测系统是否安装了 Google Chrome，优先使用系统 Chrome（更难被检测）
         String chromePath = findSystemChrome();
 
-        // 获取屏幕尺寸，用于最大化窗口
-        java.awt.Dimension screenSize = java.awt.Toolkit.getDefaultToolkit().getScreenSize();
-        int screenWidth = screenSize.width;
-        int screenHeight = screenSize.height;
-        logger.info("屏幕分辨率: {}x{}", screenWidth, screenHeight);
-
         BrowserType.LaunchOptions launchOptions = new BrowserType.LaunchOptions()
             .setHeadless(config.isHeadless())
             .setArgs(Arrays.asList(
                 "--no-sandbox",
+                "--start-maximized",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-web-security",
@@ -119,10 +114,8 @@ public class WebExplorer {
 
         this.browser = playwright.chromium().launch(launchOptions);
 
-        // 创建浏览器上下文，设置完整的反检测参数
-        // 使用屏幕尺寸作为 viewport，实现最大化效果
+        // 创建浏览器上下文，不设置 viewport，让 --start-maximized 生效
         Browser.NewContextOptions contextOptions = new Browser.NewContextOptions()
-            .setViewportSize(screenWidth, screenHeight)
             .setUserAgent(config.getUserAgent())
             .setLocale("zh-CN")
             .setTimezoneId("Asia/Shanghai")
@@ -408,13 +401,17 @@ public class WebExplorer {
                     continue;
                 }
 
-                // 截取验证码图片并转为 Base64（元素截图失败则尝试页面截图）
-                byte[] captchaBytes;
-                try {
-                    captchaBytes = captcha.image.screenshot();
-                } catch (Exception screenshotEx) {
-                    logger.warn("[步骤3] 元素截图失败，尝试页面截图: {}", screenshotEx.getMessage());
-                    captchaBytes = page.screenshot();
+                // 获取验证码图片：优先下载原图，其次元素截图
+                byte[] captchaBytes = downloadCaptchaImage(captcha.image);
+                if (captchaBytes == null) {
+                    logger.warn("[步骤3] 下载验证码原图失败，尝试截图");
+                    try {
+                        captchaBytes = captcha.image.screenshot();
+                    } catch (Exception screenshotEx) {
+                        logger.warn("[步骤3] 元素截图也失败: {}", screenshotEx.getMessage());
+                        page.waitForTimeout(1000);
+                        continue;
+                    }
                 }
                 String captchaBase64 = java.util.Base64.getEncoder().encodeToString(captchaBytes);
                 String code = captchaResolver.resolve(captchaBase64);
@@ -796,6 +793,43 @@ public class WebExplorer {
         } catch (Exception e) {
             logger.warn("{} 模块数值解析失败", moduleName);
             return 0;
+        }
+    }
+
+    /**
+     * 下载验证码原图（通过 img.src 属性获取 URL 下载）
+     */
+    private byte[] downloadCaptchaImage(Locator captchaImg) {
+        try {
+            // 获取图片 src 属性
+            String src = (String) captchaImg.evaluate("el => el.src");
+            if (src == null || src.isEmpty()) {
+                logger.debug("验证码图片没有 src 属性");
+                return null;
+            }
+            logger.info("[步骤3] 验证码原图 URL: {}", src);
+
+            // 如果是 base64 编码的图片
+            if (src.startsWith("data:image")) {
+                String base64Data = src.substring(src.indexOf(",") + 1);
+                return java.util.Base64.getDecoder().decode(base64Data);
+            }
+
+            // 如果是相对路径，拼接完整 URL
+            if (src.startsWith("/")) {
+                String baseUrl = page.url();
+                src = baseUrl.substring(0, baseUrl.indexOf("/", 8)) + src;
+            }
+
+            // 使用 Java 下载图片
+            java.net.URL url = new java.net.URL(src);
+            try (java.io.InputStream in = url.openStream()) {
+                return in.readAllBytes();
+            }
+
+        } catch (Exception e) {
+            logger.debug("下载验证码原图失败: {}", e.getMessage());
+            return null;
         }
     }
 
