@@ -647,6 +647,65 @@ public class WebExplorer {
         page.waitForLoadState(LoadState.DOMCONTENTLOADED);
         page.waitForTimeout(2000); // 额外等待结果渲染
 
+        // 优先处理 companylists (ul > li 结构)
+        try {
+            Locator companyLists = page.locator(".companylists");
+            if (companyLists.count() > 0) {
+                logger.info("[步骤4] 找到 .companylists 容器");
+                List<Locator> items = companyLists.locator("li").all();
+                logger.info("[步骤4] .companylists 下有 {} 个 li", items.size());
+
+                for (int i = 0; i < items.size(); i++) {
+                    Locator item = items.get(i);
+                    String text = item.textContent().trim();
+                    logger.info("[步骤4] li #{}: '{}'", i, text.substring(0, Math.min(text.length(), 50)));
+
+                    if (text.contains(companyName)) {
+                        logger.info("[步骤4] ✅ 在 .companylists 中精确匹配 li #{}: '{}'", i, text);
+                        // 优先点击 li 内部的 a 标签
+                        Locator link = item.locator("a");
+                        if (link.count() > 0) {
+                            clickAndSwitchToDetailPage(link.first());
+                        } else {
+                            clickAndSwitchToDetailPage(item);
+                        }
+                        return true;
+                    }
+                }
+
+                // 模糊匹配
+                for (int i = 0; i < items.size(); i++) {
+                    Locator item = items.get(i);
+                    String text = item.textContent().trim();
+                    String fuzzyName = companyName.length() > 5 ? companyName.substring(0, 5) : companyName;
+                    if (text.contains(fuzzyName)) {
+                        logger.info("[步骤4] ✅ 在 .companylists 中模糊匹配 li #{}: '{}'", i, text);
+                        Locator link = item.locator("a");
+                        if (link.count() > 0) {
+                            clickAndSwitchToDetailPage(link.first());
+                        } else {
+                            clickAndSwitchToDetailPage(item);
+                        }
+                        return true;
+                    }
+                }
+
+                // 兜底：点击第一个 li
+                if (!items.isEmpty()) {
+                    logger.info("[步骤4] ⚠️ 未匹配，点击 .companylists 第一个 li");
+                    Locator link = items.get(0).locator("a");
+                    if (link.count() > 0) {
+                        clickAndSwitchToDetailPage(link.first());
+                    } else {
+                        clickAndSwitchToDetailPage(items.get(0));
+                    }
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("处理 .companylists 失败: {}", e.getMessage());
+        }
+
         // 打印页面上所有链接文本（调试用）
         try {
             List<Locator> allLinks = page.locator("a").all();
@@ -661,11 +720,8 @@ public class WebExplorer {
             logger.debug("打印链接失败: {}", e.getMessage());
         }
 
-        // 扩展选择器列表（优先尝试 companylists）
+        // 扩展选择器列表
         String[] extendedSelectors = {
-            ".companylists a",              // ← 信用中国网站结果列表
-            ".companylists li a",
-            ".companylists tr a",
             ".search-result-item .company-name a",
             ".result-list .company-link",
             ".search-results a[href*='detail']",
