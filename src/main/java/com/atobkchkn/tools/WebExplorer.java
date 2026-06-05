@@ -477,19 +477,23 @@ public class WebExplorer {
                     continue;
                 }
 
-                // 获取验证码图片：优先下载原图，其次元素截图
+                // 获取验证码图片
+                logger.info("[步骤3] 正在获取验证码图片...");
                 byte[] captchaBytes = downloadCaptchaImage(captcha.image);
-                if (captchaBytes == null) {
-                    logger.warn("[步骤3] 下载验证码原图失败，尝试截图");
-                    try {
-                        captchaBytes = captcha.image.screenshot();
-                    } catch (Exception screenshotEx) {
-                        logger.warn("[步骤3] 元素截图也失败: {}", screenshotEx.getMessage());
-                        page.waitForTimeout(1000);
-                        continue;
-                    }
+                if (captchaBytes == null || captchaBytes.length == 0) {
+                    logger.error("[步骤3] 所有方式获取验证码图片均失败，跳过本次重试");
+                    page.waitForTimeout(1000);
+                    continue;
                 }
+
                 String captchaBase64 = java.util.Base64.getEncoder().encodeToString(captchaBytes);
+                logger.info("[步骤3] 验证码图片已获取，base64 长度: {} 字符", captchaBase64.length());
+
+                // 保存验证码图片到 debug 目录供人工核对
+                saveCaptchaDebugImage(captchaBytes, attempt);
+
+                // OCR 识别
+                logger.info("[步骤3] 正在进行 OCR 识别...");
                 String code = captchaResolver.resolve(captchaBase64);
 
                 // 如果识别为空或明显错误（如"00"），刷新验证码重新识别
@@ -505,35 +509,35 @@ public class WebExplorer {
                 }
 
                 // 使用找到的输入框和确认按钮
+                logger.info("[步骤3] 正在回填验证码 '{}' 到输入框...", code);
                 captcha.input.fill(code);
+                logger.info("[步骤3] 验证码已回填，正在点击确认按钮...");
                 captcha.confirm.click();
                 page.waitForTimeout(config.getActionDelayMillis() + 500);
+                logger.info("[步骤3] 已点击确认按钮，等待页面响应...");
 
                 CaptchaStatus status = checkCaptchaStatus();
+                logger.info("[步骤3] 验证码状态检查结果: {}", status);
 
                 if (status == CaptchaStatus.PASSED) {
-                    logger.info("[步骤3] 验证码验证成功，等待搜索结果加载...");
+                    logger.info("[步骤3] ✅ 验证码验证成功，等待搜索结果加载...");
                     page.waitForTimeout(5000); // 等待5秒让搜索结果加载
                     return;
                 }
 
                 // 验证码失效或错误，点击"换一张"刷新后重试
-                if (status == CaptchaStatus.INVALID && attempt <= 3) {
-                    logger.warn("[步骤3] 验证码已失效/错误，点击'换一张'刷新后重试 ({}/3)", attempt);
+                if (status == CaptchaStatus.INVALID) {
+                    logger.warn("[步骤3] ❌ 验证码已失效/错误（OCR识别结果: '{}'），点击'换一张'刷新后重试 ({}/{})", code, attempt, config.getMaxCaptchaRetry());
                     clickRefreshCaptchaLink();
-                    page.waitForTimeout(1000); // 等待1秒让新验证码加载
+                    page.waitForTimeout(2000); // 等待2秒让新验证码加载
                     continue;
                 }
 
                 // 验证失败（未知原因），刷新验证码后重试
-                if (attempt <= 3) {
-                    logger.warn("[步骤3] 验证码验证失败，点击'换一张'刷新后重试 ({}/3)", attempt);
-                    clickRefreshCaptchaLink();
-                    page.waitForTimeout(1000);
-                    continue;
-                }
-
-                logger.error("[步骤3] 验证码验证失败，已尝试3次，放弃");
+                logger.warn("[步骤3] ❌ 验证码验证失败（OCR识别结果: '{}'），点击'换一张'刷新后重试 ({}/{})", code, attempt, config.getMaxCaptchaRetry());
+                clickRefreshCaptchaLink();
+                page.waitForTimeout(2000);
+                continue;
 
             } catch (PlaywrightException e) {
                 if (e.getMessage().contains("timeout") || e.getMessage().contains("closed")) {
@@ -541,6 +545,8 @@ public class WebExplorer {
                     return;
                 }
                 logger.error("[步骤3] 验证码处理异常", e);
+                // 保存异常时的调试信息
+                saveDebugInfo("captcha_error_" + attempt);
             }
         }
         throw new RuntimeException("验证码处理失败，已超过最大重试次数: " + config.getMaxCaptchaRetry());
@@ -571,40 +577,63 @@ public class WebExplorer {
             if (Boolean.TRUE.equals(result)) {
                 logger.info("[步骤3] JS 检测到 id=vcodeimg 的验证码图片");
 
-                // 用 JS 获取相关元素
-                String inputSelector = (String) page.evaluate(
-                    "() => {\n"
-                    + "  var img = document.getElementById('vcodeimg');\n"
-                    + "  if (!img) return null;\n"
-                    + "  var parent = img.parentElement;\n"
-                    + "  while (parent && parent.tagName !== 'BODY') {\n"
-                    + "    var inputs = parent.querySelectorAll('input[type=text], input:not([type])');\n"
-                    + "    if (inputs.length > 0) return 'found';\n"
-                    + "    var buttons = parent.querySelectorAll('button, a');\n"
-                    + "    if (buttons.length > 0) return 'found';\n"
-                    + "    parent = parent.parentElement;\n"
-                    + "  }\n"
-                    + "  return 'found';\n"
-                    + "}");
-
                 Locator captchaImg = page.locator("#vcodeimg");
 
                 // 查找输入框：先尝试常见 id，再尝试验证码图片附近的 input
-                Locator captchaInput = page.locator("#vcode");
-                if (captchaInput.count() == 0) captchaInput = page.locator("input[name='vcode']");
-                if (captchaInput.count() == 0) captchaInput = page.locator("input[placeholder*='验证码']");
-                if (captchaInput.count() == 0) captchaInput = page.locator("input[type='text']").last();
+                Locator captchaInput = null;
+                String[] inputSelectors = {
+                    "#vcode",
+                    "input[name='vcode']",
+                    "input[placeholder*='验证码']",
+                    "input[placeholder*='校验']",
+                    "input[type='text']"
+                };
+                for (String sel : inputSelectors) {
+                    Locator loc = page.locator(sel);
+                    int count = loc.count();
+                    if (count > 0) {
+                        logger.info("[步骤3] 找到验证码输入框 | 选择器: {} | 数量: {}", sel, count);
+                        // 如果有多个，优先选择验证码图片附近的（通过 DOM 位置判断）
+                        if (count > 1) {
+                            captchaInput = findInputNearCaptcha(captchaImg, loc);
+                        } else {
+                            captchaInput = loc.first();
+                        }
+                        break;
+                    }
+                }
+                if (captchaInput == null) {
+                    logger.warn("[步骤3] 未找到验证码输入框！");
+                }
 
                 // 查找确认按钮
-                Locator confirmBtn = page.locator("button:has-text('验证')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("button:has-text('确定')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("button:has-text('确认')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("button:has-text('提交')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("a:has-text('验证')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("a:has-text('确定')");
-                if (confirmBtn.count() == 0) confirmBtn = page.locator("button").last();
+                Locator confirmBtn = null;
+                String[] confirmSelectors = {
+                    "button:has-text('验证')",
+                    "button:has-text('确定')",
+                    "button:has-text('确认')",
+                    "button:has-text('提交')",
+                    "a:has-text('验证')",
+                    "a:has-text('确定')",
+                    ".btn-confirm",
+                    "#confirm",
+                    "button"
+                };
+                for (String sel : confirmSelectors) {
+                    Locator loc = page.locator(sel);
+                    int count = loc.count();
+                    if (count > 0) {
+                        logger.info("[步骤3] 找到确认按钮 | 选择器: {} | 数量: {}", sel, count);
+                        confirmBtn = loc.first();
+                        break;
+                    }
+                }
+                if (confirmBtn == null) {
+                    logger.warn("[步骤3] 未找到确认按钮！");
+                }
 
-                logger.info("[步骤3] 通过 JS 找到完整的验证码元素");
+                logger.info("[步骤3] 通过 JS 找到完整的验证码元素 (img={}, input={}, confirm={})",
+                    captchaImg.count() > 0, captchaInput != null, confirmBtn != null);
                 return new CaptchaElements(captchaImg, captchaInput, confirmBtn, true);
             }
         } catch (Exception e) {
@@ -638,6 +667,38 @@ public class WebExplorer {
         Locator captchaInput = findCaptchaInput();
         Locator confirmBtn = findCaptchaConfirm();
         return new CaptchaElements(captchaImg, captchaInput, confirmBtn, false);
+    }
+
+    /**
+     * 在多个 input 元素中找到距离验证码图片最近的一个
+     */
+    private Locator findInputNearCaptcha(Locator captchaImg, Locator allInputs) {
+        try {
+            List<Locator> inputs = allInputs.all();
+            if (inputs.size() <= 1) {
+                return inputs.isEmpty() ? null : inputs.get(0);
+            }
+
+            // 通过 JS 获取验证码图片的位置
+            Object captchaRect = captchaImg.evaluate(
+                "element => { return { x: element.getBoundingClientRect().x, y: element.getBoundingClientRect().y }; }");
+            if (captchaRect == null) {
+                return inputs.get(0);
+            }
+
+            // 简化处理：返回第一个可见的 input
+            for (Locator input : inputs) {
+                try {
+                    if (input.isVisible()) {
+                        return input;
+                    }
+                } catch (Exception ignored) {}
+            }
+            return inputs.get(0);
+        } catch (Exception e) {
+            logger.debug("查找最近的输入框失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -856,16 +917,40 @@ public class WebExplorer {
     }
 
     /**
-     * 点击链接并切换到详情页面（支持新窗口/标签页）
+     * 点击链接并切换到详情页面（支持新窗口/标签页，也支持当前页面导航）
      */
     private void clickAndSwitchToDetailPage(Locator link) {
-        // 监听新页面打开
-        Page newPage = context.waitForPage(() -> link.click());
-        if (newPage != null && !newPage.equals(page)) {
-            logger.info("[步骤4] 详情页在新窗口打开，切换到新页面");
-            page = newPage;
+        String beforeUrl = page.url();
+        logger.info("[步骤4] 当前页面URL: {}", beforeUrl);
+
+        // 先检查链接是否有 target="_blank" 属性
+        boolean isNewWindow = false;
+        try {
+            Object targetAttr = link.evaluate("element => element.getAttribute('target')");
+            isNewWindow = "_blank".equals(targetAttr);
+            logger.info("[步骤4] 链接 target 属性: {}", targetAttr);
+        } catch (Exception e) {
+            logger.debug("[步骤4] 获取 target 属性失败: {}", e.getMessage());
         }
-        // 等待详情页加载
+
+        if (isNewWindow) {
+            // 新窗口打开
+            try {
+                Page newPage = context.waitForPage(() -> link.click());
+                if (newPage != null && !newPage.equals(page)) {
+                    logger.info("[步骤4] 详情页在新窗口打开，切换到新页面");
+                    page = newPage;
+                }
+            } catch (Exception e) {
+                logger.warn("[步骤4] 等待新页面超时，尝试直接点击: {}", e.getMessage());
+                link.click();
+            }
+        } else {
+            // 当前页面导航
+            link.click();
+        }
+
+        // 等待页面加载（无论是否新窗口）
         page.waitForLoadState(LoadState.DOMCONTENTLOADED);
         page.waitForTimeout(2000); // 用户要求等待2秒
         logger.info("[步骤4] 已打开详情页面: {}", page.url());
@@ -933,21 +1018,27 @@ public class WebExplorer {
 
     /**
      * 下载验证码原图（通过 img.src 属性获取 URL 下载）
+     * 支持三种方式：直接下载 URL、解析 data URL、JS 绘制到 canvas 获取 base64
      */
     private byte[] downloadCaptchaImage(Locator captchaImg) {
+        // 方式1：通过 Playwright evaluate 获取 src（注意变量名必须是 element）
+        String src = null;
         try {
-            // 获取图片 src 属性
-            String src = (String) captchaImg.evaluate("el => el.src");
-            if (src == null || src.isEmpty()) {
-                logger.debug("验证码图片没有 src 属性");
-                return null;
-            }
-            logger.info("[步骤3] 验证码原图 URL: {}", src);
+            src = (String) captchaImg.evaluate("element => element.src");
+            logger.info("[步骤3] 验证码 img.src = {}", src != null ? src.substring(0, Math.min(src.length(), 100)) : "null");
+        } catch (Exception e) {
+            logger.warn("[步骤3] 获取 img.src 失败: {}", e.getMessage());
+        }
 
+        if (src != null && !src.isEmpty()) {
             // 如果是 base64 编码的图片
             if (src.startsWith("data:image")) {
-                String base64Data = src.substring(src.indexOf(",") + 1);
-                return java.util.Base64.getDecoder().decode(base64Data);
+                try {
+                    String base64Data = src.substring(src.indexOf(",") + 1);
+                    return java.util.Base64.getDecoder().decode(base64Data);
+                } catch (Exception e) {
+                    logger.warn("[步骤3] 解析 data URL 失败: {}", e.getMessage());
+                }
             }
 
             // 如果是相对路径，拼接完整 URL
@@ -957,15 +1048,51 @@ public class WebExplorer {
             }
 
             // 使用 Java 下载图片
-            java.net.URL url = new java.net.URL(src);
-            try (java.io.InputStream in = url.openStream()) {
-                return in.readAllBytes();
+            try {
+                java.net.URL url = new java.net.URL(src);
+                try (java.io.InputStream in = url.openStream()) {
+                    byte[] bytes = in.readAllBytes();
+                    logger.info("[步骤3] 通过 URL 下载验证码图片成功，大小: {} 字节", bytes.length);
+                    return bytes;
+                }
+            } catch (Exception e) {
+                logger.warn("[步骤3] 通过 URL 下载验证码图片失败: {}", e.getMessage());
             }
-
-        } catch (Exception e) {
-            logger.debug("下载验证码原图失败: {}", e.getMessage());
-            return null;
         }
+
+        // 方式2：使用 JavaScript 将图片绘制到 canvas 后导出 base64
+        try {
+            String base64FromCanvas = (String) page.evaluate(
+                "() => {\n"
+                + "  var img = document.getElementById('vcodeimg');\n"
+                + "  if (!img || !img.complete || img.naturalWidth === 0) return null;\n"
+                + "  var canvas = document.createElement('canvas');\n"
+                + "  canvas.width = img.naturalWidth;\n"
+                + "  canvas.height = img.naturalHeight;\n"
+                + "  var ctx = canvas.getContext('2d');\n"
+                + "  ctx.drawImage(img, 0, 0);\n"
+                + "  return canvas.toDataURL('image/png');\n"
+                + "}");
+            if (base64FromCanvas != null && base64FromCanvas.startsWith("data:image")) {
+                String base64Data = base64FromCanvas.substring(base64FromCanvas.indexOf(",") + 1);
+                byte[] bytes = java.util.Base64.getDecoder().decode(base64Data);
+                logger.info("[步骤3] 通过 Canvas 导出验证码图片成功，大小: {} 字节", bytes.length);
+                return bytes;
+            }
+        } catch (Exception e) {
+            logger.warn("[步骤3] Canvas 导出验证码图片失败: {}", e.getMessage());
+        }
+
+        // 方式3：直接元素截图（fallback）
+        try {
+            byte[] bytes = captchaImg.screenshot();
+            logger.info("[步骤3] 元素截图获取验证码成功，大小: {} 字节", bytes.length);
+            return bytes;
+        } catch (Exception e) {
+            logger.error("[步骤3] 元素截图也失败: {}", e.getMessage());
+        }
+
+        return null;
     }
 
     /**
@@ -1009,18 +1136,45 @@ public class WebExplorer {
      * 同时检测是否有"失效"、"错误"等提示
      */
     private CaptchaStatus checkCaptchaStatus() {
-        // 检查验证码图片是否消失（通过验证的典型特征）
-        boolean imgVisible = false;
-        try {
-            imgVisible = page.locator("#vcodeimg").isVisible();
-        } catch (Exception ignored) {}
+        // 等待一小段时间让页面响应
+        page.waitForTimeout(1500);
 
-        if (!imgVisible) {
+        // 检查1：验证码图片是否消失（通过验证的典型特征）
+        boolean imgExists = false;
+        try {
+            imgExists = page.locator("#vcodeimg").count() > 0;
+        } catch (Exception e) {
+            logger.debug("[步骤3] 检查 vcodeimg 是否存在时出错: {}", e.getMessage());
+        }
+
+        boolean imgVisible = false;
+        if (imgExists) {
+            try {
+                imgVisible = page.locator("#vcodeimg").isVisible();
+            } catch (Exception e) {
+                logger.debug("[步骤3] 检查 vcodeimg 可见性时出错: {}", e.getMessage());
+            }
+        }
+
+        logger.info("[步骤3] 验证码图片存在={}, 可见={}", imgExists, imgVisible);
+
+        if (!imgExists) {
+            logger.info("[步骤3] 验证码图片已消失（从DOM中移除），判断为验证通过");
             return CaptchaStatus.PASSED;
         }
 
-        // 检查页面是否有"失效"、"错误"提示
-        String[] errorKeywords = {"失效", "错误", "失败", "请重新申请", "不正确"};
+        // 检查2：验证码输入框是否消失（验证通过后模态框关闭）
+        boolean inputExists = false;
+        try {
+            inputExists = page.locator("#vcode").count() > 0 || page.locator("input[placeholder*='验证码']").count() > 0;
+        } catch (Exception ignored) {}
+        if (!inputExists && !imgVisible) {
+            logger.info("[步骤3] 验证码输入框已消失，判断为验证通过");
+            return CaptchaStatus.PASSED;
+        }
+
+        // 检查3：页面是否有"失效"、"错误"提示
+        String[] errorKeywords = {"失效", "错误", "失败", "请重新申请", "不正确", "超时", "验证码"};
         String pageText = "";
         try {
             pageText = page.locator("body").textContent();
@@ -1028,12 +1182,30 @@ public class WebExplorer {
 
         for (String keyword : errorKeywords) {
             if (pageText.contains(keyword)) {
-                logger.warn("[步骤3] 检测到验证码{}提示", keyword);
-                return CaptchaStatus.INVALID;
+                logger.warn("[步骤3] 检测到页面包含 '{}' 提示", keyword);
+                // 进一步确认是否是验证码相关的错误提示
+                // 如果页面上还有验证码图片，说明是验证码错误
+                if (imgExists) {
+                    return CaptchaStatus.INVALID;
+                }
             }
         }
 
-        // 验证码图片还在，但没有错误提示 → 可能是验证失败但未刷新
+        // 检查4：当前 URL 是否变化（验证通过后可能跳转或加载新内容）
+        String currentUrl = page.url();
+        if (!currentUrl.contains("captcha") && !currentUrl.contains("verify") && hasSearchResults()) {
+            logger.info("[步骤3] 页面已有搜索结果，判断为验证通过");
+            return CaptchaStatus.PASSED;
+        }
+
+        // 验证码图片还在，且没有明确通过迹象
+        if (imgVisible) {
+            logger.info("[步骤3] 验证码图片仍然可见，判断为验证未通过");
+            return CaptchaStatus.FAILED;
+        }
+
+        // 图片存在但不可见（可能被隐藏），再等待一下
+        logger.info("[步骤3] 验证码图片存在但不可见，可能是隐藏/过渡状态，等待后重试");
         return CaptchaStatus.FAILED;
     }
 
@@ -1089,6 +1261,21 @@ public class WebExplorer {
         String absPath = dir.toAbsolutePath().toString();
         logger.warn("===== 调试信息已保存到: {} =====", absPath);
         return absPath;
+    }
+
+    /**
+     * 保存验证码调试图片，方便人工核对 OCR 识别结果
+     */
+    private void saveCaptchaDebugImage(byte[] captchaBytes, int attempt) {
+        try {
+            Path dir = Paths.get("debug", "captcha");
+            Files.createDirectories(dir);
+            Path file = dir.resolve("captcha_attempt_" + attempt + "_" + System.currentTimeMillis() + ".png");
+            Files.write(file, captchaBytes);
+            logger.info("[步骤3] 验证码调试图片已保存: {}", file.toAbsolutePath());
+        } catch (Exception e) {
+            logger.debug("[步骤3] 保存验证码调试图片失败: {}", e.getMessage());
+        }
     }
 
     private String saveScreenshot() {
