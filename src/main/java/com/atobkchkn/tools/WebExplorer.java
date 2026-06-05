@@ -661,8 +661,11 @@ public class WebExplorer {
             logger.debug("打印链接失败: {}", e.getMessage());
         }
 
-        // 扩展选择器列表
+        // 扩展选择器列表（优先尝试 companylists）
         String[] extendedSelectors = {
+            ".companylists a",              // ← 信用中国网站结果列表
+            ".companylists li a",
+            ".companylists tr a",
             ".search-result-item .company-name a",
             ".result-list .company-link",
             ".search-results a[href*='detail']",

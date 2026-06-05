@@ -44,7 +44,7 @@ public class WebExplorerConfig {
     /** 显式等待超时（秒） */
     private int waitTimeoutSeconds = 30;
     /** 验证码最大重试次数 */
-    private int maxCaptchaRetry = 5;
+    private int maxCaptchaRetry = 10;
     /** 页面操作间隔（毫秒） */
     private int actionDelayMillis = 1000;
 
